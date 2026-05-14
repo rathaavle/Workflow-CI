@@ -6,7 +6,6 @@ Nama: Athalie Aurora
 
 import argparse
 import os
-import json
 import joblib
 import numpy as np
 import pandas as pd
@@ -16,7 +15,6 @@ import matplotlib.pyplot as plt
 
 import mlflow
 import mlflow.sklearn
-import dagshub
 
 from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.metrics import (
@@ -38,7 +36,7 @@ def parse_args():
 
 
 # ─────────────────────────────────────────────
-# INIT DAGSHUB
+# INIT MLFLOW
 # ─────────────────────────────────────────────
 def init_mlflow():
     dagshub_token = os.environ.get('DAGSHUB_TOKEN', '')
@@ -48,7 +46,6 @@ def init_mlflow():
         mlflow.set_tracking_uri('https://dagshub.com/rathaavle/ml-system.mlflow')
     else:
         mlflow.set_tracking_uri('mlruns')
-    mlflow.set_experiment('california-housing-ci')
     print('[INFO] MLflow tracking initialized.')
 
 
@@ -72,12 +69,9 @@ def plot_actual_vs_predicted(y_true, y_pred):
 
 
 # ─────────────────────────────────────────────
-# MAIN TRAINING
+# TRAINING LOGIC
 # ─────────────────────────────────────────────
-def main():
-    args = parse_args()
-    init_mlflow()
-
+def run_training(args):
     # Load data
     train_df = pd.read_csv(args.train_path)
     test_df  = pd.read_csv(args.test_path)
@@ -90,52 +84,69 @@ def main():
 
     print(f'[INFO] Train: {X_train.shape} | Test: {X_test.shape}')
 
-    with mlflow.start_run(run_name='CI_GradientBoosting'):
-        # Log params
-        mlflow.log_param('n_estimators',  args.n_estimators)
-        mlflow.log_param('max_depth',     args.max_depth)
-        mlflow.log_param('learning_rate', args.learning_rate)
-        mlflow.log_param('model_type',    'GradientBoostingRegressor')
+    # Log params
+    mlflow.log_param('n_estimators',  args.n_estimators)
+    mlflow.log_param('max_depth',     args.max_depth)
+    mlflow.log_param('learning_rate', args.learning_rate)
+    mlflow.log_param('model_type',    'GradientBoostingRegressor')
 
-        # Train
-        model = GradientBoostingRegressor(
-            n_estimators=args.n_estimators,
-            max_depth=args.max_depth,
-            learning_rate=args.learning_rate,
-            random_state=42
-        )
-        model.fit(X_train, y_train)
-        y_pred = model.predict(X_test)
+    # Train
+    model = GradientBoostingRegressor(
+        n_estimators=args.n_estimators,
+        max_depth=args.max_depth,
+        learning_rate=args.learning_rate,
+        random_state=42
+    )
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
 
-        # Metrics
-        mse  = mean_squared_error(y_test, y_pred)
-        rmse = np.sqrt(mse)
-        mae  = mean_absolute_error(y_test, y_pred)
-        r2   = r2_score(y_test, y_pred)
-        mape = mean_absolute_percentage_error(y_test, y_pred)
+    # Metrics
+    mse  = mean_squared_error(y_test, y_pred)
+    rmse = np.sqrt(mse)
+    mae  = mean_absolute_error(y_test, y_pred)
+    r2   = r2_score(y_test, y_pred)
+    mape = mean_absolute_percentage_error(y_test, y_pred)
 
-        mlflow.log_metric('mse',  mse)
-        mlflow.log_metric('rmse', rmse)
-        mlflow.log_metric('mae',  mae)
-        mlflow.log_metric('r2',   r2)
-        mlflow.log_metric('mape', mape)
+    mlflow.log_metric('mse',  mse)
+    mlflow.log_metric('rmse', rmse)
+    mlflow.log_metric('mae',  mae)
+    mlflow.log_metric('r2',   r2)
+    mlflow.log_metric('mape', mape)
 
-        print(f'[INFO] R²: {r2:.4f} | RMSE: {rmse:.4f} | MAE: {mae:.4f}')
+    print(f'[INFO] R²: {r2:.4f} | RMSE: {rmse:.4f} | MAE: {mae:.4f}')
 
-        # Log model
-        mlflow.sklearn.log_model(model, artifact_path='model')
+    # Log model
+    mlflow.sklearn.log_model(model, artifact_path='model')
 
-        # Artefak: Actual vs Predicted
-        avp_path = plot_actual_vs_predicted(y_test.values, y_pred)
-        mlflow.log_artifact(avp_path, artifact_path='plots')
-        os.remove(avp_path)
+    # Artefak: Actual vs Predicted
+    avp_path = plot_actual_vs_predicted(y_test.values, y_pred)
+    mlflow.log_artifact(avp_path, artifact_path='plots')
+    os.remove(avp_path)
 
-        # Simpan model lokal untuk Docker
-        os.makedirs('saved_model', exist_ok=True)
-        joblib.dump(model, 'saved_model/model.pkl')
-        mlflow.log_artifact('saved_model/model.pkl', artifact_path='saved_model')
+    # Simpan model lokal untuk Docker
+    os.makedirs('saved_model', exist_ok=True)
+    joblib.dump(model, 'saved_model/model.pkl')
+    mlflow.log_artifact('saved_model/model.pkl', artifact_path='saved_model')
 
     print('[DONE] Training selesai.')
+
+
+# ─────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────
+def main():
+    args = parse_args()
+    init_mlflow()
+
+    # Jika sudah ada active run (dari MLflow Project), gunakan langsung
+    # Jika tidak, buat run baru
+    active_run = mlflow.active_run()
+    if active_run:
+        print(f'[INFO] Using existing MLflow run: {active_run.info.run_id}')
+        run_training(args)
+    else:
+        with mlflow.start_run(run_name='CI_GradientBoosting'):
+            run_training(args)
 
 
 if __name__ == '__main__':

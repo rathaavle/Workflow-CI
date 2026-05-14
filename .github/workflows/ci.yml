@@ -41,47 +41,7 @@ jobs:
                       mlflow==2.19.0 dagshub==0.3.36 \
                       matplotlib==3.9.2 joblib==1.4.2
 
-      # ── 4. Run preprocessing (generate dataset) ───────────
-      - name: Run Preprocessing
-        run: |
-          python -c "
-          import numpy as np, pandas as pd, os
-          from sklearn.datasets import fetch_california_housing
-          from sklearn.model_selection import train_test_split
-          from sklearn.preprocessing import StandardScaler
-          from sklearn.impute import SimpleImputer
-
-          california = fetch_california_housing(as_frame=True)
-          df = california.frame
-          X = df.drop('MedHouseVal', axis=1)
-          y = df['MedHouseVal']
-
-          imputer = SimpleImputer(strategy='median')
-          X = pd.DataFrame(imputer.fit_transform(X), columns=X.columns)
-
-          for col in X.columns:
-              Q1, Q3 = X[col].quantile(0.25), X[col].quantile(0.75)
-              IQR = Q3 - Q1
-              X[col] = X[col].clip(Q1 - 1.5*IQR, Q3 + 1.5*IQR)
-
-          X['RoomsPerHousehold']      = X['AveRooms']   / X['HouseAge'].replace(0,1)
-          X['BedroomsPerRoom']        = X['AveBedrms']  / X['AveRooms'].replace(0,1)
-          X['PopulationPerHousehold'] = X['Population'] / X['AveOccup'].replace(0,1)
-
-          X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-          scaler = StandardScaler()
-          X_train_s = pd.DataFrame(scaler.fit_transform(X_train), columns=X.columns)
-          X_test_s  = pd.DataFrame(scaler.transform(X_test),      columns=X.columns)
-
-          os.makedirs('MLProject/california_housing_preprocessing', exist_ok=True)
-          train_df = X_train_s.copy(); train_df['MedHouseVal'] = y_train.values
-          test_df  = X_test_s.copy();  test_df['MedHouseVal']  = y_test.values
-          train_df.to_csv('MLProject/california_housing_preprocessing/train.csv', index=False)
-          test_df.to_csv('MLProject/california_housing_preprocessing/test.csv',   index=False)
-          print('Preprocessing done.')
-          "
-
-      # ── 5. Train model via MLflow Project ─────────────────
+      # ── 4. Train model via MLflow Project ─────────────────
       - name: Train Model (MLflow Project)
         env:
           DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
@@ -126,11 +86,8 @@ jobs:
 
       - name: Build Docker Image via MLflow
         run: |
-          cd MLProject
-          mlflow models build-docker \
-            -m "saved_model" \
-            -n "rathaavle/california-housing-model:latest" \
-            --enable-mlserver
+          cp -r MLProject/saved_model saved_model || true
+          docker build -t rathaavle/california-housing-model:latest .
 
       - name: Push Docker Image to Docker Hub
         run: |
