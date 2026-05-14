@@ -1,0 +1,149 @@
+name: CI - Train & Deploy Model
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      n_estimators:
+        description: "Number of estimators"
+        required: false
+        default: "200"
+      max_depth:
+        description: "Max depth"
+        required: false
+        default: "10"
+      learning_rate:
+        description: "Learning rate"
+        required: false
+        default: "0.1"
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # ── 2. Setup Python ──────────────────────────────────
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.7"
+
+      # ── 3. Install dependencies ───────────────────────────
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy==1.26.4 pandas==2.2.2 scikit-learn==1.5.2 \
+                      mlflow==2.19.0 dagshub==0.3.36 \
+                      matplotlib==3.9.2 joblib==1.4.2
+
+      # ── 4. Run preprocessing (generate dataset) ───────────
+      - name: Run Preprocessing
+        run: |
+          python -c "
+          import numpy as np, pandas as pd, os
+          from sklearn.datasets import fetch_california_housing
+          from sklearn.model_selection import train_test_split
+          from sklearn.preprocessing import StandardScaler
+          from sklearn.impute import SimpleImputer
+
+          california = fetch_california_housing(as_frame=True)
+          df = california.frame
+          X = df.drop('MedHouseVal', axis=1)
+          y = df['MedHouseVal']
+
+          imputer = SimpleImputer(strategy='median')
+          X = pd.DataFrame(imputer.fit_transform(X), columns=X.columns)
+
+          for col in X.columns:
+              Q1, Q3 = X[col].quantile(0.25), X[col].quantile(0.75)
+              IQR = Q3 - Q1
+              X[col] = X[col].clip(Q1 - 1.5*IQR, Q3 + 1.5*IQR)
+
+          X['RoomsPerHousehold']      = X['AveRooms']   / X['HouseAge'].replace(0,1)
+          X['BedroomsPerRoom']        = X['AveBedrms']  / X['AveRooms'].replace(0,1)
+          X['PopulationPerHousehold'] = X['Population'] / X['AveOccup'].replace(0,1)
+
+          X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+          scaler = StandardScaler()
+          X_train_s = pd.DataFrame(scaler.fit_transform(X_train), columns=X.columns)
+          X_test_s  = pd.DataFrame(scaler.transform(X_test),      columns=X.columns)
+
+          os.makedirs('MLProject/california_housing_preprocessing', exist_ok=True)
+          train_df = X_train_s.copy(); train_df['MedHouseVal'] = y_train.values
+          test_df  = X_test_s.copy();  test_df['MedHouseVal']  = y_test.values
+          train_df.to_csv('MLProject/california_housing_preprocessing/train.csv', index=False)
+          test_df.to_csv('MLProject/california_housing_preprocessing/test.csv',   index=False)
+          print('Preprocessing done.')
+          "
+
+      # ── 5. Train model via MLflow Project ─────────────────
+      - name: Train Model (MLflow Project)
+        env:
+          DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
+          MLFLOW_TRACKING_USERNAME: rathaavle
+          MLFLOW_TRACKING_PASSWORD: ${{ secrets.DAGSHUB_TOKEN }}
+          MLFLOW_TRACKING_URI: https://dagshub.com/rathaavle/ml-system.mlflow
+        run: |
+          cd MLProject
+          mlflow run . \
+            -P n_estimators=${{ github.event.inputs.n_estimators || '200' }} \
+            -P max_depth=${{ github.event.inputs.max_depth || '10' }} \
+            -P learning_rate=${{ github.event.inputs.learning_rate || '0.1' }} \
+            --env-manager=local
+
+      # ── 6. Upload artefak ke GitHub ───────────────────────
+      - name: Upload Model Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trained-model-${{ github.run_number }}
+          path: |
+            MLProject/saved_model/
+            MLProject/mlruns/
+
+      # ── 7. Commit model ke repo ───────────────────────────
+      - name: Commit Model to Repository
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add MLProject/saved_model/ || true
+          git diff --staged --quiet || git commit -m "ci: update trained model [run #${{ github.run_number }}] [skip ci]"
+          git push || true
+
+      # ── 8. Build & Push Docker Image ──────────────────────
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build Docker Image via MLflow
+        run: |
+          cd MLProject
+          mlflow models build-docker \
+            -m "saved_model" \
+            -n "rathaavle/california-housing-model:latest" \
+            --enable-mlserver
+
+      - name: Push Docker Image to Docker Hub
+        run: |
+          docker push rathaavle/california-housing-model:latest
+          docker tag rathaavle/california-housing-model:latest \
+                     rathaavle/california-housing-model:run-${{ github.run_number }}
+          docker push rathaavle/california-housing-model:run-${{ github.run_number }}
+
+      - name: Save Docker Hub Link
+        run: |
+          echo "https://hub.docker.com/r/rathaavle/california-housing-model" > MLProject/docker_hub_link.txt
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add MLProject/docker_hub_link.txt || true
+          git diff --staged --quiet || git commit -m "ci: add docker hub link [skip ci]"
+          git push || true
